@@ -1,3 +1,4 @@
-[submodule "Py3CrawlerLib"]
-	path = Py3CrawlerLib
+[submodule "common"]
+	path = common
 	url = https://github.com/yxw19870806/Py3CrawlerLib.git
+	branch = master
