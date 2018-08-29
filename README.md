@@ -12,6 +12,5 @@
 4. 频道名字（下载过程中自动获取，第一次使用不用填写）
 
 ## 账号ID获取步骤
-点击任意视频发布者头像旁的名字，进入频道主页
-地址类似为**https://www.youtube.com/channel/[UCa1b2c3d4e5f6g7h8i9j0k_]**，其中[]中的数字或者字母（实际不包括[]）就是账号的ID
-也支持用户首页，如**https://www.youtube.com/user/[ABC123]**
+点击视频发布者头像旁的名字，进入频道主页
+地址类似为 https://www.youtube.com/channel/[UCa1b2c3d4e5f_6g7h8i9j0k]，其中[]中的字符（实际不包括[]）就是账号的ID
