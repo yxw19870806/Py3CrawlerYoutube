@@ -1,0 +1,3 @@
+[submodule "Py3CrawlerLib"]
+	path = Py3CrawlerLib
+	url = https://github.com/yxw19870806/Py3CrawlerLib.git
