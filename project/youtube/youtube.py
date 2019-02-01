@@ -58,39 +58,37 @@ def get_one_page_video(account_id, token):
         if index_response_content.find('<button id="a11y-skip-nav" class="skip-nav"') >= 0:
             log.step("首页 %s 访问出现跳转，再次访问" % index_url)
             return get_one_page_video(account_id, token)
-        result["channel_name"] = tool.find_sub_string(index_response_content, '<meta property="og:title" content="', '">').replace("- YouTube", "").strip()
-        if index_response_content.find('{"alertRenderer":{"type":"ERROR",') != -1:
-            reason = tool.find_sub_string(tool.find_sub_string(index_response_content, '{"alertRenderer":{"type":"ERROR",', '}],'), '{"simpleText":"', '"}')
+        # 截取初始化数据
+        script_json_html = tool.find_sub_string(index_response_content, 'window["ytInitialData"] =', ";\n").strip()
+        if not script_json_html:
+            raise crawler.CrawlerException("页面截取视频信息失败\n%s" % index_response_content)
+        script_json = tool.json_decode(script_json_html)
+        if script_json is None:
+            raise crawler.CrawlerException("视频信息加载失败\n%s" % script_json_html)
+        # 获取频道名字
+        try:
+            result["channel_name"] = crawler.get_json_value(script_json, "metadata", "channelMetadataRenderer", "title", type_check=str)
+        except crawler.CrawlerException:
+            reason = crawler.get_json_value(script_json, "alerts", 0, "alertRenderer", "text", "simpleText", default_value="", type_check=str)
             if reason == "This channel does not exist.":
                 raise crawler.CrawlerException("账号不存在")
-            else:
+            elif reason:
                 raise crawler.CrawlerException("账号无法访问，原因：%s" % reason)
-        script_data_html = tool.find_sub_string(index_response_content, 'window["ytInitialData"] =', ";\n").strip()
-        if not script_data_html:
-            raise crawler.CrawlerException("页面截取视频信息失败\n%s" % index_response_content)
-        script_data = tool.json_decode(script_data_html)
-        if script_data is None:
-            raise crawler.CrawlerException("视频信息加载失败\n%s" % script_data_html)
-        try:
-            channel_tab_data = script_data["contents"]["twoColumnBrowseResultsRenderer"]["tabs"]
-        except KeyError:
-            raise crawler.CrawlerException("页面解析频道标签失败\n%s" % script_data)
+            else:
+                raise
+        # 获取频道标签
+        channel_tab_json = crawler.get_json_value(script_json, "contents", "twoColumnBrowseResultsRenderer", "tabs", type_check=list)
         # 没有视频标签
-        if len(channel_tab_data) < 2:
+        if len(channel_tab_json) < 2:
             return result
+        video_tab_json = crawler.get_json_value(channel_tab_json, 1, "tabRenderer", "content", "sectionListRenderer", "contents", 0, "itemSectionRenderer", "contents", 0, original_data=script_json, type_check=dict)
         try:
-            temp_data = channel_tab_data[1]["tabRenderer"]["content"]["sectionListRenderer"]["contents"][0]["itemSectionRenderer"]["contents"][0]
-        except KeyError:
-            raise crawler.CrawlerException("页面解析视频信息失败\n%s" % script_data)
-        if not crawler.check_sub_key(("gridRenderer",), temp_data):
-            try:
-                # 没有上传过任何视频
-                if temp_data["messageRenderer"]["text"]["simpleText"] == "This channel has no videos.":
-                    return result
-            except KeyError:
-                pass
-            raise crawler.CrawlerException("视频列表信息'gridRenderer'字段不存在\n%s" % temp_data)
-        video_list_data = temp_data["gridRenderer"]
+            video_list_json = crawler.get_json_value(video_tab_json, "gridRenderer", original_data=script_json, type_check=dict)
+        except crawler.CrawlerException:
+            # 没有上传过任何视频
+            if crawler.get_json_value(video_tab_json, "messageRenderer", "text", "simpleText", default_value="", type_check=str) == "This channel has no videos.":
+                return result
+            raise
     else:
         query_url = "https://www.youtube.com/browse_ajax"
         query_data = {"ctoken": token}
@@ -102,27 +100,13 @@ def get_one_page_video(account_id, token):
         video_pagination_response = net.http_request(query_url, method="GET", fields=query_data, header_list=header_list, json_decode=True)
         if video_pagination_response.status != net.HTTP_RETURN_CODE_SUCCEED:
             raise crawler.CrawlerException(crawler.request_failre(video_pagination_response.status))
-        try:
-            video_list_data = video_pagination_response.json_data[1]["response"]["continuationContents"]["gridContinuation"]
-        except KeyError:
-            raise crawler.CrawlerException("返回信息解析视频信息失败\n%s" % video_pagination_response.json_data)
-        except IndexError:
-            raise crawler.CrawlerException("返回信息解析视频信息失败\n%s" % video_pagination_response.json_data)
-    if not crawler.check_sub_key(("items",), video_list_data):
-        raise crawler.CrawlerException("视频列表信息'items'字段不存在\n%s" % video_list_data)
-    for item in video_list_data["items"]:
-        if not crawler.check_sub_key(("gridVideoRenderer",), item):
-            raise crawler.CrawlerException("视频信息'gridVideoRenderer'字段不存在\n%s" % item)
-        if not crawler.check_sub_key(("videoId",), item["gridVideoRenderer"]):
-            raise crawler.CrawlerException("视频信息'gridVideoRenderer'字段不存在\n%s" % item)
-        result["video_id_list"].append(item["gridVideoRenderer"]["videoId"])
+        video_list_json = crawler.get_json_value(video_pagination_response.json_data, 1, "response", "continuationContents", "gridContinuation", type_check=dict)
+    # 获取所有video id
+    for item in crawler.get_json_value(video_list_json, "items", type_check=list):
+        result["video_id_list"].append(crawler.get_json_value(item, "gridVideoRenderer", "videoId", type_check=str))
     # 获取下一页token
-    try:
-        result["next_page_token"] = video_list_data["continuations"][0]["nextContinuationData"]["continuation"]
-    except KeyError:
-        pass
-    except IndexError:
-        pass
+    if crawler.check_sub_key(("continuations",), video_list_json):
+        result["next_page_token"] = crawler.get_json_value(video_list_json, "continuations", 0, "nextContinuationData", "continuation", type_check=str)
     return result
 
 
@@ -137,48 +121,94 @@ def get_video_page(video_id):
         # 没有登录时默认使用英语
         video_play_response = net.http_request(video_play_url, method="GET", fields=query_data, header_list={"accept-language": "en"})
     result = {
-        "is_delete": False,  # 是否已删除
+        "skip_reason": "", # 跳过原因
         "video_time": None,  # 视频上传时间
         "video_title": "",  # 视频标题
         "video_url": None,  # 视频地址
     }
-    # 获取视频地址
     if video_play_response.status != net.HTTP_RETURN_CODE_SUCCEED:
         raise crawler.CrawlerException(crawler.request_failre(video_play_response.status))
     video_play_response_content = video_play_response.data.decode(errors="ignore")
-    if video_play_response_content.find('"playabilityStatus":{"status":"UNPLAYABLE"') != -1 or video_play_response_content.find('"playabilityStatus":{"status":"ERROR"') != -1:
-        result["is_delete"] = True
+
+    # window["ytInitialPlayerResponse"]
+    script_json_html = tool.find_sub_string(video_play_response_content, 'window["ytInitialPlayerResponse"] = (\n', ");\n")
+    if not script_json_html:
+        raise crawler.CrawlerException("页面截取ytInitialPlayerResponse失败\n%s" % video_play_response_content)
+    script_json = tool.json_decode(script_json_html.strip())
+    if script_json is None:
+        raise crawler.CrawlerException("ytInitialPlayerResponse加载失败\n%s" % script_json_html)
+    video_status = crawler.get_json_value(script_json, "playabilityStatus", "status", type_check=str, value_check=["OK", "ERROR", "UNPLAYABLE", "LOGIN_REQUIRED"])
+    if video_status != "OK":
+        reason = crawler.get_json_value(script_json, "playabilityStatus", "reason", type_check=str)
+        # https://www.youtube.com/watch?v=f8K4FFjgL88
+        if video_status == "LOGIN_REQUIRED":
+            if IS_LOGIN:
+                raise crawler.CrawlerException("登录状态丢失")
+            result["skip_reason"] = "需要登录账号才能访问，" + reason
+        else:
+            # ERROR
+            # https://www.youtube.com/watch?v=_8zpXuXj_Tw
+            # UNPLAYABLE
+            # https://www.youtube.com/watch?v=ku0Jf8yiH-k
+            result["skip_reason"] = reason
+
+    # window["ytInitialData"]
+    script_json_html = tool.find_sub_string(video_play_response_content, 'window["ytInitialData"] = ', ";\n")
+    if not script_json_html:
+        raise crawler.CrawlerException("页面截取ytInitialData失败\n%s" % video_play_response_content)
+    script_json = tool.json_decode(script_json_html.strip())
+    if script_json is None:
+        raise crawler.CrawlerException("ytInitialData加载失败\n%s" % script_json_html)
+    # 获取视频发布时间
+    try:
+        video_time_string = crawler.get_json_value(script_json, "contents", "twoColumnWatchNextResults", "results", "results", "contents", 1, "videoSecondaryInfoRenderer",
+                                               "dateText", "simpleText", type_check=str)
+    except crawler.CrawlerException:
+        if video_status == "ERROR":
+            result["skip_reason"] = "视频不存在"
+            return result["skip_reason"]
+        else:
+            raise
+    video_time = 0
+    # en
+    video_time_find = re.findall("(\w* \d*, \d*)", video_time_string)
+    if len(video_time_find) == 1:
+        try:
+            video_time = time.strptime(video_time_string, "%b %d, %Y")
+        except ValueError:
+            pass
+    else:
+        # zh、zh-hk
+        video_time_find = re.findall("(\d*)年(\d*)月(\d*)日", video_time_string)
+        if len(video_time_find) != 1:
+            # ja
+            video_time_find = re.findall("(\d*)/(\d*)/(\d*)", video_time_string)
+        if len(video_time_find) == 1:
+            try:
+                video_time = time.strptime("%s %s %s" % (video_time_find[0][0], video_time_find[0][1], video_time_find[0][2]), "%Y %m %d")
+            except ValueError:
+                pass
+    if video_time == 0:
+        raise crawler.CrawlerException("视频发布时间文本格式不正确\n%s" % video_time_string)
+    result["video_time"] = int(time.mktime(video_time))
+    if result["skip_reason"]:
         return result
-    # 没有登录，判断是否必须要登录
-    if not IS_LOGIN:
-        need_login_reason = tool.find_sub_string(video_play_response_content, '"playabilityStatus":{"status":"LOGIN_REQUIRED","reason":"', '",')
-        if need_login_reason:
-            if need_login_reason == "Sign in to confirm your age":
-                raise crawler.CrawlerException("视频需要登录账号并且年龄通过检测后才能访问")
-            else:
-                raise crawler.CrawlerException("视频需要登录账号才能访问，原因：%s" % need_login_reason)
-    video_info_string = tool.find_sub_string(video_play_response_content, "ytplayer.config = ", ";ytplayer.load = ").strip()
-    if not video_info_string:
-        raise crawler.CrawlerException("页面截取视频信息失败\n%s" % video_play_response_content)
-    video_info_data = tool.json_decode(video_info_string)
-    if video_info_data is None:
-        raise crawler.CrawlerException("视频信息格式不正确\n%s" % video_info_string)
-    if not crawler.check_sub_key(("args",), video_info_data):
-        raise crawler.CrawlerException("视频信息'args'字段不存在\n%s" % video_info_data)
+
+    # ytplayer.config
+    script_json_html = tool.find_sub_string(video_play_response_content, "ytplayer.config = ", ";ytplayer.load = ").strip()
+    if not script_json_html:
+        raise crawler.CrawlerException("页面截取ytplayer.config失败\n%s" % video_play_response_content)
+    script_json = tool.json_decode(script_json_html)
+    if script_json is None:
+        raise crawler.CrawlerException("ytplayer.config加载失败\n%s" % script_json_html)
     # 获取视频标题
-    if not crawler.check_sub_key(("title",), video_info_data["args"]):
-        raise crawler.CrawlerException("视频信息'title'字段不存在\n%s" % video_info_data)
-    result["video_title"] = video_info_data["args"]["title"]
+    result["video_title"] = crawler.get_json_value(script_json, "args", "title", type_check=str)
     # 获取视频地址
-    if not crawler.check_sub_key(("url_encoded_fmt_stream_map",), video_info_data["args"]):
-        raise crawler.CrawlerException("视频信息'url_encoded_fmt_stream_map'字段不存在\n%s" % video_info_data["args"])
-    # 各个分辨率下的视频地址
-    resolution_to_url = {}
-    # signature生成步骤
-    decrypt_function_step = []
-    for sub_url_encoded_fmt_stream_map in video_info_data["args"]["url_encoded_fmt_stream_map"].split(","):
+    resolution_to_url = {}  # 各个分辨率下的视频地址
+    decrypt_function_step = []  # signature生成步骤
+    url_encoded_fmt_stream_map_list = crawler.get_json_value(script_json, "args", "url_encoded_fmt_stream_map", type_check=str).split(",")
+    for sub_url_encoded_fmt_stream_map in url_encoded_fmt_stream_map_list:
         video_resolution = video_url = signature = None
-        is_skip = False
         for sub_param in sub_url_encoded_fmt_stream_map.split("&"):
             key, value = sub_param.split("=", 1)
             if key == "type":  # 视频类型
@@ -186,10 +216,10 @@ def get_video_page(video_id):
                 if video_type.find("video/mp4") == 0:
                     pass  # 只要mp4类型的
                 elif video_type.find("video/webm") == 0 or video_type.find("video/3gpp") == 0:
-                    is_skip = True  # 跳过
                     break
                 else:
                     log.notice("未知视频类型：" + video_type)
+                    break
             elif key == "quality":  # 视频画质
                 if value == "tiny":
                     video_resolution = 144
@@ -209,31 +239,28 @@ def get_video_page(video_id):
             elif key == "s":
                 # 解析JS文件，获取对应的加密方法
                 if len(decrypt_function_step) == 0:
-                    js_file_name = tool.find_sub_string(video_play_response_content, 'src="/yts/jsbin/player-', '/base.js"')
+                    js_file_name = tool.find_sub_string(video_play_response_content, 'src="/yts/jsbin/player', '/base.js"')
+                    if not js_file_name:
+                        js_file_name = tool.find_sub_string(video_play_response_content, 'src="https://s.ytimg.com/yts/jsbin/player', '/base.js"')
                     if js_file_name:
-                        js_file_url = "https://www.youtube.com/yts/jsbin/player-%s/base.js" % js_file_name
+                        js_file_url = "https://www.youtube.com/yts/jsbin/player%s/base.js" % js_file_name
                     else:
-                        js_file_name = tool.find_sub_string(video_play_response_content, 'src="https://s.ytimg.com/yts/jsbin/player-', '/base.js"')
-                        if js_file_name:
-                            js_file_url = "https://s.ytimg.com/yts/jsbin/player-%s/base.js" % js_file_name
-                        else:
-                            raise crawler.CrawlerException("播放器JS文件地址截取失败\n%s" % video_play_response_content)
+                        raise crawler.CrawlerException("播放器JS文件地址截取失败\n%s" % video_play_response_content)
                     decrypt_function_step = get_decrypt_step(js_file_url)
                 # 生成加密字符串
                 signature = decrypt_signature(decrypt_function_step, value)
             elif key == "sig":
                 signature = value
-        if is_skip:
-            continue
-        if video_resolution is None or video_url is None:
-            log.notice("未知视频未知视频参数：" + video_info_string)
-            continue
-        # 加上signature参数
-        if signature is not None:
-            video_url += "&signature=" + signature
-        resolution_to_url[video_resolution] = video_url
+        else:
+            if video_resolution is None or video_url is None:
+                log.notice("未知视频未知视频参数：%s" % url_encoded_fmt_stream_map_list)
+                continue
+            # 加上signature参数
+            if signature is not None:
+                video_url += "&signature=" + signature
+            resolution_to_url[video_resolution] = video_url
     if len(resolution_to_url) == 0:
-        raise crawler.CrawlerException("视频地址解析错误\n%s" % video_info_string)
+        raise crawler.CrawlerException("视频地址解析错误\n%s" % script_json)
     # 优先使用配置中的分辨率
     if FIRST_CHOICE_RESOLUTION in resolution_to_url:
         result["video_url"] = resolution_to_url[FIRST_CHOICE_RESOLUTION]
@@ -242,48 +269,11 @@ def get_video_page(video_id):
         # 大于配置中分辨率的所有视频中分辨率最小的那个
         for resolution in sorted(resolution_to_url.keys()):
             if resolution > FIRST_CHOICE_RESOLUTION:
-                result["video_url"] = resolution_to_url[FIRST_CHOICE_RESOLUTION]
+                result["video_url"] = resolution_to_url[resolution]
                 break
-        # 如果还是没有，则所有视频中分辨率最大的那个
-        if result["video_url"] is None:
+        else:
+            # 如果还是没有，则所有视频中分辨率最大的那个
             result["video_url"] = resolution_to_url[max(resolution_to_url)]
-    # 获取视频发布时间
-    video_time_string = tool.find_sub_string(video_play_response_content, '"dateText":{"simpleText":"', '"},').strip()
-    if not video_time_string:
-        video_time_string = tool.find_sub_string(video_play_response_content, '<strong class="watch-time-text">', '</strong>').strip()
-    if not video_time_string:
-        raise crawler.CrawlerException("页面截取视频发布时间错误\n%s" % video_play_response_content)
-    # 英语
-    if video_time_string.find("Published on") >= 0 or video_time_string.find("Streamed live on") >= 0:
-        video_time_string = video_time_string.replace("Published on", "").replace("Streamed live on", "").strip()
-        try:
-            video_time = time.strptime(video_time_string, "%b %d, %Y")
-        except ValueError:
-            raise crawler.CrawlerException("视频发布时间文本格式不正确\n%s" % video_time_string)
-    # 简体中文
-    elif video_time_string.find("发布") >= 0 or video_time_string.find("上线日期：") >= 0:
-        video_time_string = video_time_string.replace("发布", "").replace("上线日期：", "").strip()
-        try:
-            video_time = time.strptime(video_time_string, "%Y年%m月%d日")
-        except ValueError:
-            raise crawler.CrawlerException("视频发布时间文本格式不正确\n%s" % video_time_string)
-    # 繁体中文
-    elif video_time_string.find("发布") >= 0 or video_time_string.find("即時串流日期：") >= 0:
-        video_time_string = video_time_string.replace("即時串流日期：", "").strip()
-        try:
-            video_time = time.strptime(video_time_string, "%Y年%m月%d日")
-        except ValueError:
-            raise crawler.CrawlerException("视频发布时间文本格式不正确\n%s" % video_time_string)
-    # 日文
-    elif video_time_string.find("に公開") >= 0 or video_time_string.find("にライブ配信") >= 0:
-        video_time_string = video_time_string.replace("に公開", "").replace("にライブ配信", "").strip()
-        try:
-            video_time = time.strptime(video_time_string, "%Y/%m/%d")
-        except ValueError:
-            raise crawler.CrawlerException("视频发布时间文本格式不正确\n%s" % video_time_string)
-    else:
-        raise crawler.CrawlerException("未知语言的时间格式\n%s" % video_time_string)
-    result["video_time"] = int(time.mktime(video_time))
     return result
 
 
@@ -547,8 +537,10 @@ class Download(crawler.DownloadThread):
             else:
                 self.is_find = True
 
-        if video_response["is_delete"]:
-            self.error("视频%s不存在，跳过" % video_id)
+        if video_response["skip_reason"]:
+            self.error("视频%s已跳过，原因：%s" % (video_id, video_response["skip_reason"]))
+            self.account_info[1] = video_id  # 设置存档记录
+            # self.account_info[2] = str(video_response["video_time"])  # 设置存档记录
             return
 
         self.step("开始下载视频%s《%s》 %s" % (video_id, video_response["video_title"], video_response["video_url"]))
